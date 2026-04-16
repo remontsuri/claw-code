@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
@@ -332,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn collects_and_runs_hooks_from_enabled_plugins() {
         let config_home = temp_dir("config");
         let first_source_root = temp_dir("source-a");
@@ -381,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         let runner = HookRunner::new(crate::PluginHooks {
             pre_tool_use: vec!["printf 'blocked by plugin'; exit 2".to_string()],

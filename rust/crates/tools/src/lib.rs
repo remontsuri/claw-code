@@ -1,3 +1,6 @@
+mod web_api;
+mod ai_inference;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -325,7 +328,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "format": "uri" },
-                    "prompt": { "type": "string" }
+                    "prompt": { "type": "string" },
+                    "max_length": {
+                        "type": "integer",
+                        "minimum": 100,
+                        "maximum": 50000,
+                        "description": "Maximum characters of content to return (default 4000)"
+                    }
                 },
                 "required": ["url", "prompt"],
                 "additionalProperties": false
@@ -346,6 +355,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "blocked_domains": {
                         "type": "array",
                         "items": { "type": "string" }
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Maximum number of results to return (default 10, max 20)"
                     }
                 },
                 "required": ["query"],
@@ -533,6 +548,51 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        ToolSpec {
+            name: "WebAPI",
+            description: "Perform an HTTP request to any REST API (GET, POST, PUT, DELETE, PATCH) with optional auth and custom headers.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "format": "uri" },
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"] },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "body": { "type": "string" },
+                    "auth": {
+                        "type": "object",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["bearer", "basic", "api_key"] },
+                            "token": { "type": "string" },
+                            "username": { "type": "string" },
+                            "password": { "type": "string" },
+                            "api_key_header": { "type": "string" }
+                        }
+                    },
+                    "timeout": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["url", "method"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "AIInference",
+            description: "Call another AI model (Ollama, OpenAI, Anthropic) for specialized tasks like code generation, analysis, or creative writing.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "system_prompt": { "type": "string" },
+                    "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+                    "max_tokens": { "type": "integer", "minimum": 1 },
+                    "custom_endpoint": { "type": "string" }
+                },
+                "required": ["model", "prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
     ]
 }
 
@@ -559,6 +619,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
         "PowerShell" => from_value::<PowerShellInput>(input).and_then(run_powershell),
+        "WebAPI" => from_value::<web_api::WebApiInput>(input).and_then(|i| {
+            to_pretty_json(web_api::execute_web_api(&i).map_err(|e| e)?)
+        }),
+        "AIInference" => from_value::<ai_inference::AiInferenceInput>(input).and_then(|i| {
+            to_pretty_json(ai_inference::execute_ai_inference(&i).map_err(|e| e)?)
+        }),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -699,6 +765,8 @@ struct GlobSearchInputValue {
 struct WebFetchInput {
     url: String,
     prompt: String,
+    #[serde(default)]
+    max_length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -706,6 +774,8 @@ struct WebSearchInput {
     query: String,
     allowed_domains: Option<Vec<String>>,
     blocked_domains: Option<Vec<String>>,
+    #[serde(default)]
+    max_results: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1011,7 +1081,8 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let body = response.text().map_err(|error| error.to_string())?;
     let bytes = body.len();
     let normalized = normalize_fetched_content(&body, &content_type);
-    let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
+    let max_len = input.max_length.unwrap_or(4000);
+    let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type, max_len);
 
     Ok(WebFetchOutput {
         bytes,
@@ -1026,18 +1097,14 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
 fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
     let started = Instant::now();
     let client = build_http_client()?;
-    let search_url = build_search_url(&input.query)?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| error.to_string())?;
+    let max_results = input.max_results.unwrap_or(10).min(20);
 
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
-    let mut hits = extract_search_hits(&html);
+    // Try primary search engine
+    let mut hits = fetch_search_hits(&client, &input.query)?;
 
-    if hits.is_empty() && final_url.host_str().is_some() {
-        hits = extract_search_hits_from_generic_links(&html);
+    // Fallback to Bing if DuckDuckGo returned nothing
+    if hits.is_empty() {
+        hits = fetch_bing_hits(&client, &input.query).unwrap_or_default();
     }
 
     if let Some(allowed) = input.allowed_domains.as_ref() {
@@ -1048,19 +1115,22 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     }
 
     dedupe_hits(&mut hits);
-    hits.truncate(8);
+    hits.truncate(max_results);
 
     let summary = if hits.is_empty() {
         format!("No web search results matched the query {:?}.", input.query)
     } else {
         let rendered_hits = hits
             .iter()
-            .map(|hit| format!("- [{}]({})", hit.title, hit.url))
+            .enumerate()
+            .map(|(i, hit)| format!("{}. [{}]({})", i + 1, hit.title, hit.url))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "Search results for {:?}. Include a Sources section in the final answer.\n{}",
-            input.query, rendered_hits
+            "Search results for {:?} ({} results). Include a Sources section in the final answer.\n{}",
+            input.query,
+            hits.len(),
+            rendered_hits
         )
     };
 
@@ -1114,6 +1184,38 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+fn fetch_search_hits(client: &Client, query: &str) -> Result<Vec<SearchHit>, String> {
+    let search_url = build_search_url(query)?;
+    let response = client
+        .get(search_url)
+        .send()
+        .map_err(|e| e.to_string())?;
+    let final_url = response.url().clone();
+    let html = response.text().map_err(|e| e.to_string())?;
+    let mut hits = extract_search_hits(&html);
+    if hits.is_empty() && final_url.host_str().is_some() {
+        hits = extract_search_hits_from_generic_links(&html);
+    }
+    Ok(hits)
+}
+
+fn fetch_bing_hits(client: &Client, query: &str) -> Result<Vec<SearchHit>, String> {
+    let mut url = reqwest::Url::parse("https://www.bing.com/search")
+        .map_err(|e| e.to_string())?;
+    url.query_pairs_mut().append_pair("q", query);
+    let response = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .map_err(|e| e.to_string())?;
+    let html = response.text().map_err(|e| e.to_string())?;
+    let mut hits = extract_search_hits(&html);
+    if hits.is_empty() {
+        hits = extract_search_hits_from_generic_links(&html);
+    }
+    Ok(hits)
+}
+
 fn normalize_fetched_content(body: &str, content_type: &str) -> String {
     if content_type.contains("html") {
         html_to_text(body)
@@ -1128,19 +1230,23 @@ fn summarize_web_fetch(
     content: &str,
     raw_body: &str,
     content_type: &str,
+    max_length: usize,
 ) -> String {
     let lower_prompt = prompt.to_lowercase();
     let compact = collapse_whitespace(content);
 
     let detail = if lower_prompt.contains("title") {
         extract_title(content, raw_body, content_type).map_or_else(
-            || preview_text(&compact, 600),
+            || preview_text(&compact, max_length.min(600)),
             |title| format!("Title: {title}"),
         )
     } else if lower_prompt.contains("summary") || lower_prompt.contains("summarize") {
-        preview_text(&compact, 900)
+        preview_text(&compact, max_length)
+    } else if lower_prompt.contains("full") || lower_prompt.contains("all") || lower_prompt.contains("complete") {
+        // User wants full content
+        preview_text(&compact, max_length.max(8000))
     } else {
-        let preview = preview_text(&compact, 900);
+        let preview = preview_text(&compact, max_length);
         format!("Prompt: {prompt}\nContent preview:\n{preview}")
     };
 
@@ -2544,22 +2650,46 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
-    let _ = input.timeout_ms;
+    let timeout_ms = input.timeout_ms.unwrap_or(30_000);
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = Command::new(runtime.program)
+
+    let mut child = Command::new(runtime.program)
         .args(runtime.args)
         .arg(&input.code)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{} runtime not found: {e}", input.language))?;
 
-    Ok(ReplOutput {
-        language: input.language,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(1),
-        duration_ms: started.elapsed().as_millis(),
-    })
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            let output = child.wait_with_output().map_err(|e| e.to_string())?;
+            return Ok(ReplOutput {
+                language: input.language,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                exit_code: status.code().unwrap_or(1),
+                duration_ms: started.elapsed().as_millis(),
+            });
+        }
+        if started.elapsed().as_millis() >= timeout_ms as u128 {
+            let _ = child.kill();
+            let output = child.wait_with_output().map_err(|e| e.to_string())?;
+            return Ok(ReplOutput {
+                language: input.language,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: format!(
+                    "{}{}Code exceeded timeout of {timeout_ms} ms",
+                    String::from_utf8_lossy(&output.stderr),
+                    if output.stderr.is_empty() { "" } else { "\n" }
+                ),
+                exit_code: 124, // standard timeout exit code
+                duration_ms: started.elapsed().as_millis(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 struct ReplRuntime {
@@ -2569,14 +2699,19 @@ struct ReplRuntime {
 
 fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
     match language.trim().to_ascii_lowercase().as_str() {
-        "python" | "py" => Ok(ReplRuntime {
+        "python" | "py" | "python3" => Ok(ReplRuntime {
             program: detect_first_command(&["python3", "python"])
                 .ok_or_else(|| String::from("python runtime not found"))?,
             args: &["-c"],
         }),
-        "javascript" | "js" | "node" => Ok(ReplRuntime {
+        "javascript" | "js" | "node" | "nodejs" => Ok(ReplRuntime {
             program: detect_first_command(&["node"])
                 .ok_or_else(|| String::from("node runtime not found"))?,
+            args: &["-e"],
+        }),
+        "typescript" | "ts" => Ok(ReplRuntime {
+            program: detect_first_command(&["ts-node", "deno"])
+                .ok_or_else(|| String::from("typescript runtime not found (install ts-node or deno)"))?,
             args: &["-e"],
         }),
         "sh" | "shell" | "bash" => Ok(ReplRuntime {
@@ -2584,7 +2719,34 @@ fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
                 .ok_or_else(|| String::from("shell runtime not found"))?,
             args: &["-lc"],
         }),
-        other => Err(format!("unsupported REPL language: {other}")),
+        "ruby" | "rb" => Ok(ReplRuntime {
+            program: detect_first_command(&["ruby"])
+                .ok_or_else(|| String::from("ruby runtime not found"))?,
+            args: &["-e"],
+        }),
+        "php" => Ok(ReplRuntime {
+            program: detect_first_command(&["php"])
+                .ok_or_else(|| String::from("php runtime not found"))?,
+            args: &["-r"],
+        }),
+        "perl" | "pl" => Ok(ReplRuntime {
+            program: detect_first_command(&["perl"])
+                .ok_or_else(|| String::from("perl runtime not found"))?,
+            args: &["-e"],
+        }),
+        "lua" => Ok(ReplRuntime {
+            program: detect_first_command(&["lua", "lua5.4", "lua5.3"])
+                .ok_or_else(|| String::from("lua runtime not found"))?,
+            args: &["-e"],
+        }),
+        "powershell" | "pwsh" | "ps1" => Ok(ReplRuntime {
+            program: detect_first_command(&["pwsh", "powershell"])
+                .ok_or_else(|| String::from("powershell runtime not found"))?,
+            args: &["-NoProfile", "-NonInteractive", "-Command"],
+        }),
+        other => Err(format!(
+            "unsupported REPL language: {other}. Supported: python, javascript, typescript, bash, ruby, php, perl, lua, powershell"
+        )),
     }
 }
 
@@ -2861,12 +3023,25 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        std::process::Command::new("where")
+            .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3448,6 +3623,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn skill_loads_local_skill_prompt() {
         let _guard = env_lock()
             .lock()
@@ -3935,6 +4111,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
             .expect("bash should succeed");
@@ -4106,6 +4283,7 @@ mod tests {
         assert!(globbed_output["filenames"][0]
             .as_str()
             .expect("filename")
+            .replace('\\', "/")
             .ends_with("nested/lib.rs"));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
@@ -4274,6 +4452,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn repl_executes_python_code() {
         let result = execute_tool(
             "REPL",
@@ -4287,6 +4466,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
             .lock()
@@ -4390,7 +4570,14 @@ printf 'pwsh:%s' "$1"
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut buffer = [0_u8; 4096];
-                        let size = stream.read(&mut buffer).expect("read request");
+                        let size = match stream.read(&mut buffer) {
+                            Ok(n) => n,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            Err(e) => panic!("read request: {e}"),
+                        };
                         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                         let request_line = request.lines().next().unwrap_or_default().to_string();
                         let response = handler(&request_line);

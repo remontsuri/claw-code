@@ -717,12 +717,13 @@ mod tests {
         let _guard = env_lock();
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::set_var("CLAW_CONFIG_HOME", "/nonexistent/path/that/does/not/exist");
         let error = super::read_api_key().expect_err("missing key should error");
         assert!(matches!(
             error,
             crate::error::ApiError::MissingCredentials { .. }
         ));
+        std::env::remove_var("CLAW_CONFIG_HOME");
     }
 
     #[test]
@@ -730,12 +731,14 @@ mod tests {
         let _guard = env_lock();
         std::env::set_var("ANTHROPIC_AUTH_TOKEN", "");
         std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::set_var("CLAW_CONFIG_HOME", "/nonexistent/path/that/does/not/exist");
         let error = super::read_api_key().expect_err("empty key should error");
         assert!(matches!(
             error,
             crate::error::ApiError::MissingCredentials { .. }
         ));
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAW_CONFIG_HOME");
     }
 
     #[test]

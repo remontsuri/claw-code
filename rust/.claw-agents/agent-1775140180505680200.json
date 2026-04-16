@@ -1,0 +1,12 @@
+{
+  "agentId": "agent-1775140180505680200",
+  "name": "verify-the-branch",
+  "description": "Verify the branch",
+  "subagentType": "Explore",
+  "model": "claude-opus-4-6",
+  "status": "running",
+  "outputFile": "C:\\Users\\vladc\\Desktop\\code\\claw-code-original\\rust\\.claw-agents\\agent-1775140180505680200.md",
+  "manifestFile": "C:\\Users\\vladc\\Desktop\\code\\claw-code-original\\rust\\.claw-agents\\agent-1775140180505680200.json",
+  "createdAt": "1775140180",
+  "startedAt": "1775140180"
+}

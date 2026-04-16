@@ -2873,7 +2873,7 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
 
 struct DefaultRuntimeClient {
     runtime: tokio::runtime::Runtime,
-    client: ClawApiClient,
+    client: api::ProviderClient,
     model: String,
     enable_tools: bool,
     emit_output: bool,
@@ -2891,10 +2891,12 @@ impl DefaultRuntimeClient {
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let auth = resolve_cli_auth_source().ok();
+        let client = api::ProviderClient::from_model_with_default_auth(&model, auth)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
-            client: ClawApiClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url()),
+            client,
             model,
             enable_tools,
             emit_output,
@@ -2921,15 +2923,27 @@ impl ApiClient for DefaultRuntimeClient {
         if let Some(progress_reporter) = &self.progress_reporter {
             progress_reporter.mark_model_phase();
         }
+
+        // Ollama models don't support tool calling reliably — disable tools and
+        // strip the verbose system prompt down to a short one so the model doesn't
+        // echo it back as text.
+        let is_ollama = self.client.provider_kind() == api::ProviderKind::Ollama;
+        let enable_tools = self.enable_tools && !is_ollama;
+        let system = if is_ollama {
+            // Minimal system prompt for local models
+            Some("You are a helpful AI coding assistant. Answer concisely and clearly.".to_string())
+        } else {
+            (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"))
+        };
+
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: max_tokens_for_model(&self.model),
             messages: convert_messages(&request.messages),
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
-            tools: self
-                .enable_tools
+            system,
+            tools: enable_tools
                 .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref())),
-            tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
+            tool_choice: enable_tools.then_some(ToolChoice::Auto),
             stream: true,
         };
 

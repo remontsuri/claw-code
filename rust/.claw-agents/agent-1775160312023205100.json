@@ -1,0 +1,12 @@
+{
+  "agentId": "agent-1775160312023205100",
+  "name": "ship-audit",
+  "description": "Review the branch",
+  "subagentType": "general-purpose",
+  "model": "claude-opus-4-6",
+  "status": "running",
+  "outputFile": "C:\\Users\\vladc\\Desktop\\code\\claw-code-original\\rust\\.claw-agents\\agent-1775160312023205100.md",
+  "manifestFile": "C:\\Users\\vladc\\Desktop\\code\\claw-code-original\\rust\\.claw-agents\\agent-1775160312023205100.json",
+  "createdAt": "1775160312",
+  "startedAt": "1775160312"
+}

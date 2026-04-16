@@ -143,6 +143,31 @@ The new Python `src/` tree currently provides:
 
 ## Quickstart
 
+### Ollama Integration (NEW!)
+
+Claw now supports local LLMs via Ollama:
+
+```bash
+cd rust
+
+# Run with any Ollama model
+./target/release/claw --model qwen2.5-coder:7b
+
+# Interactive mode
+./target/release/claw --model llama3.2
+
+# Simple prompt
+./target/release/claw --model qwen2.5-coder:7b "Explain Rust ownership"
+```
+
+Auto-detection works for models with `:` or starting with `llama`, `qwen`, `mistral`, `codellama`.
+
+See [OLLAMA_QUICKSTART.md](OLLAMA_QUICKSTART.md) for details.
+
+---
+
+### Python Workspace
+
 Render the Python porting summary:
 
 ```bash

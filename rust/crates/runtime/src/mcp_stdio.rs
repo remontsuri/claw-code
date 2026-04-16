@@ -802,11 +802,12 @@ fn default_initialize_params() -> McpInitializeParams {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
